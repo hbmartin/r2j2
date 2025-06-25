@@ -45,7 +45,9 @@ npm run deploy
 
 ## Usage
 
-### API Endpoint
+### API Endpoints
+
+#### Add Journal Entry
 
 - **Method**: GET
 - **Path**: `/`
@@ -53,17 +55,35 @@ npm run deploy
   - `password` (required): Must match your `SECRET_PASSWORD`
   - `text` (required): Journal entry text (will be URL decoded)
 
-### Example Request
-
+**Example Request:**
 ```bash
 curl "https://your-worker.your-subdomain.workers.dev/?password=your-secret&text=Hello%20World%21"
 ```
 
+#### Retrieve Journal Contents
+
+- **Method**: GET
+- **Path**: `/csv`
+- **Parameters**:
+  - `password` (required): Must match your `SECRET_PASSWORD`
+
+**Example Request:**
+```bash
+curl "https://your-worker.your-subdomain.workers.dev/csv?password=your-secret"
+```
+
+**Example Response:**
+```
+1640995200,Hello World!
+1640995260,Another entry
+```
+
 ### Response Codes
 
-- `200`: Entry successfully saved
+- `200`: Success (entry saved or contents returned)
 - `400`: Missing required parameters
 - `401`: Invalid password
+- `405`: Method not allowed (non-GET requests)
 - `500`: Server error
 
 ## Development
