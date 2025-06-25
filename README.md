@@ -107,7 +107,7 @@ Add these secrets to your GitHub repository settings:
    - Account Resources: Include your account
    - Zone Resources: Include your zones (if any)
 
-2. **CLOUDFLARE_ACCOUNT_ID**: Found in the right sidebar of your Cloudflare dashboard
+2. **CLOUDFLARE_ACCOUNT_ID**: Copy from `npx wrangler whoami` or find in your (Cloudflare dashboard)[https://developers.cloudflare.com/fundamentals/account/find-account-and-zone-ids/]
 
 ### Manual Deployment
 
