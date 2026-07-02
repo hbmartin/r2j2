@@ -139,19 +139,34 @@ function parseNonNegativeInt(value: string | null): number | undefined | null {
 async function loadEntries(env: Env, filters: Filters): Promise<JournalEntry[]> {
 	const [keys, legacy] = await Promise.all([listEntryKeys(env, filters.since), loadLegacyEntries(env)]);
 
-	const entries: JournalEntry[] = legacy.filter((entry) => filters.since === undefined || entry.timestamp > filters.since);
-	for (let i = 0; i < keys.length; i += READ_BATCH_SIZE) {
+	// Merge timestamps first and apply the limit before fetching any bodies,
+	// so a limited read costs at most `limit` R2 get() calls, not one per entry.
+	interface PendingEntry {
+		timestamp: number;
+		text?: string;
+		key?: string;
+	}
+	const merged: PendingEntry[] = [
+		...legacy.filter((entry) => filters.since === undefined || entry.timestamp > filters.since),
+		...keys.map((key) => ({ timestamp: key.timestamp, key: key.key })),
+	];
+	merged.sort((a, b) => a.timestamp - b.timestamp);
+	const selected = filters.limit === undefined ? merged : merged.slice(0, filters.limit);
+
+	const entries: JournalEntry[] = [];
+	for (let i = 0; i < selected.length; i += READ_BATCH_SIZE) {
 		const batch = await Promise.all(
-			keys.slice(i, i + READ_BATCH_SIZE).map(async (key) => {
-				const object = await env.JOURNAL_BUCKET.get(key.key);
-				return object === null ? null : { timestamp: key.timestamp, text: await object.text() };
+			selected.slice(i, i + READ_BATCH_SIZE).map(async (pending) => {
+				if (pending.key === undefined) {
+					return { timestamp: pending.timestamp, text: pending.text ?? '' };
+				}
+				const object = await env.JOURNAL_BUCKET.get(pending.key);
+				return object === null ? null : { timestamp: pending.timestamp, text: await object.text() };
 			}),
 		);
 		entries.push(...batch.filter((entry) => entry !== null));
 	}
-
-	entries.sort((a, b) => a.timestamp - b.timestamp);
-	return filters.limit === undefined ? entries : entries.slice(0, filters.limit);
+	return entries;
 }
 
 interface EntryKey {
@@ -211,8 +226,13 @@ function entryKey(env: Env, timestamp: number): string {
 }
 
 function timestampFromKey(key: string, prefix: string): number | null {
-	const timestamp = Number(key.slice(prefix.length, prefix.length + TIMESTAMP_PAD));
-	return Number.isInteger(timestamp) ? timestamp : null;
+	const encoded = key.slice(prefix.length, prefix.length + TIMESTAMP_PAD);
+	// Require exactly TIMESTAMP_PAD digits so foreign objects under the prefix
+	// (e.g. a manually uploaded `entries/123`) are ignored, not misparsed.
+	if (encoded.length !== TIMESTAMP_PAD || !/^\d+$/.test(encoded)) {
+		return null;
+	}
+	return Number(encoded);
 }
 
 function padTimestamp(timestamp: number): string {

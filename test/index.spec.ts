@@ -157,6 +157,15 @@ describe('writing and reading entries', () => {
 	it('returns an empty body when there are no entries', async () => {
 		expect(await readCsv()).toBe('');
 	});
+
+	it('ignores foreign objects under the entries prefix', async () => {
+		await env.JOURNAL_BUCKET.put(`${env.ENTRIES_PREFIX}123`, 'not a journal entry');
+		await seedEntry(100, 'real entry');
+		expect(await readCsv()).toBe('100,real entry\n');
+
+		const count = await SELF.fetch(`${BASE}/count?password=${PASSWORD}`);
+		expect(await count.json()).toEqual({ count: 1 });
+	});
 });
 
 describe('since and limit filters', () => {

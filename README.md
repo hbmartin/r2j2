@@ -133,4 +133,4 @@ For local dev, put a development password in `.dev.vars` (gitignored):
 SECRET_PASSWORD=dev-password
 ```
 
-CI (`.github/workflows/ci.yml`) runs lint, typecheck, a check that `worker-configuration.d.ts` is up to date, and the test suite on every push and pull request.
+CI (`.github/workflows/ci.yml`) runs lint, typecheck, a check that `worker-configuration.d.ts` is up to date, and the test suite on pushes to `main` and on pull requests.
