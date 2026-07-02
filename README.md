@@ -1,144 +1,136 @@
 # Journal API Worker
 
-A Cloudflare Worker that provides a secure API endpoint for logging timestamped journal entries to R2 storage.
+A Cloudflare Worker that provides a password-protected API for logging timestamped journal entries to R2 storage.
+
+Each entry is stored as its own R2 object (under the `entries/` prefix), so concurrent writes are atomic and can never overwrite each other. A pre-existing single-file journal (`journal.txt`) from older versions of this worker is still read and merged into results. See [SPEC.md](SPEC.md) for the full API specification.
 
 ## Setup Instructions
 
 ### 1. Create R2 Bucket
 
-First, create an R2 bucket:
-
 ```bash
-npx wrangler r2 bucket create your-bucket-name
+npx wrangler r2 bucket create <your-bucket-name>
 ```
 
-### 2. Configure Environment Variables
+Then set `bucket_name` in `wrangler.jsonc` to match (this repo deploys to a bucket named `harold-martin`):
 
-Set the secret password for API authentication:
+```jsonc
+"r2_buckets": [
+	{
+		"binding": "JOURNAL_BUCKET",
+		"bucket_name": "harold-martin"
+	}
+]
+```
+
+### 2. Configure the Secret
+
+Set the password used for API authentication:
 
 ```bash
 npx wrangler secret put SECRET_PASSWORD
 ```
 
-When prompted, enter your desired password. This will be stored securely in Cloudflare's environment.
+When prompted, enter your desired password. It is stored securely in Cloudflare and compared in constant time on every request.
 
-### 3. Verify Configuration
+### 3. Optional Configuration
 
-The R2 bucket binding is already configured in `wrangler.jsonc`:
+`wrangler.jsonc` exposes two vars you can override per deployment:
 
-```json
-"r2_buckets": [
-  {
-    "binding": "JOURNAL_BUCKET",
-    "bucket_name": "your-bucket-name"
-  }
-]
-```
+| Var | Default | Purpose |
+|-----|---------|---------|
+| `ENTRIES_PREFIX` | `entries/` | R2 key prefix for per-entry objects |
+| `LEGACY_JOURNAL_KEY` | `journal.txt` | Single-file journal from older versions, merged into reads |
+
+It also configures a `RATE_LIMITER` binding (100 requests per minute per IP) to slow down password brute-forcing.
 
 ### 4. Deploy
 
-Deploy the worker to Cloudflare:
-
 ```bash
-npm run deploy
+pnpm run deploy
 ```
+
+Pushes to `main` also deploy automatically via GitHub Actions (`.github/workflows/deploy.yml`), using the `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` repository secrets.
 
 ## Usage
 
-### API Endpoints
+All endpoints are `GET` and take the password as a `password` query parameter.
 
-#### Add Journal Entry
+> Note: the password travels in the URL by design (this API is meant to be callable from anywhere a URL can go). Be aware that URLs can end up in logs and browser history; the per-IP rate limit and constant-time comparison mitigate brute-forcing, but treat any URL containing the password as sensitive.
 
-- **Method**: GET
+### Add Journal Entry
+
 - **Path**: `/`
-- **Parameters**:
-  - `password` (required): Must match your `SECRET_PASSWORD`
-  - `text` (required): Journal entry text (will be URL decoded)
+- **Parameters**: `password` (required), `text` (required)
 
-**Example Request:**
 ```bash
 curl "https://your-worker.your-subdomain.workers.dev/?password=your-secret&text=Hello%20World%21"
 ```
 
-#### Retrieve Journal Contents
+Returns `200` with a JSON body:
 
-- **Method**: GET
-- **Path**: `/csv`
-- **Parameters**:
-  - `password` (required): Must match your `SECRET_PASSWORD`
-
-**Example Request:**
-```bash
-curl "https://your-worker.your-subdomain.workers.dev/csv?password=your-secret"
+```json
+{"timestamp": 1640995200}
 ```
 
-**Example Response:**
+### Retrieve Journal Contents
+
+- **Path**: `/csv`
+- **Parameters**: `password` (required), `since` (optional Unix timestamp, exclusive), `limit` (optional positive integer)
+
+```bash
+curl "https://your-worker.your-subdomain.workers.dev/csv?password=your-secret&since=1640995200&limit=100"
+```
+
+Returns `200` with `text/csv` content, oldest first. Text containing commas, quotes, or newlines is escaped per RFC 4180:
+
 ```
 1640995200,Hello World!
-1640995260,Another entry
+1640995260,"an entry, with a comma"
+```
+
+### Count Journal Entries
+
+- **Path**: `/count`
+- **Parameters**: `password` (required), `since` (optional Unix timestamp, exclusive)
+
+```bash
+curl "https://your-worker.your-subdomain.workers.dev/count?password=your-secret"
+```
+
+Returns `200` with a JSON body:
+
+```json
+{"count": 2}
 ```
 
 ### Response Codes
 
-- `200`: Success (entry saved or contents returned)
-- `400`: Missing required parameters
-- `401`: Invalid password
+- `200`: Success
+- `400`: Missing `text`, or invalid `since`/`limit`
+- `401`: Missing or invalid password
+- `404`: Unknown path (authenticated requests only; unauthenticated requests always get 401)
 - `405`: Method not allowed (non-GET requests)
+- `429`: Rate limit exceeded
 - `500`: Server error
 
 ## Development
 
-### Local Development
-
 ```bash
-npm run dev
+pnpm install
+pnpm dev            # local dev server at http://localhost:8787
+pnpm test           # tests in watch mode
+pnpm test:run       # tests once
+pnpm typecheck      # tsc over src and test
+pnpm lint           # biome check
+pnpm format         # biome check --write
+pnpm cf-typegen     # regenerate worker-configuration.d.ts after changing wrangler.jsonc
 ```
 
-### Testing Locally
+For local dev, put a development password in `.dev.vars` (gitignored):
 
-The worker will be available at `http://localhost:8787` when running locally.
-
-**Note**: Local development requires setting up R2 bucket access. You may need to configure local R2 credentials or use `--remote` flag:
-
-```bash
-npm run dev -- --remote
+```
+SECRET_PASSWORD=dev-password
 ```
 
-### File Format
-
-Entries are stored in `journal.txt` with the format:
-```
-{unix_timestamp},{url_decoded_text}
-{unix_timestamp},{url_decoded_text}
-...
-```
-
-## Continuous Deployment
-
-The repository includes a GitHub Action that automatically deploys to Cloudflare Workers when changes are pushed to the `main` branch.
-
-### Setup GitHub Secrets
-
-Add these secrets to your GitHub repository settings:
-
-1. **CLOUDFLARE_API_TOKEN**: Create an API token at https://dash.cloudflare.com/profile/api-tokens
-   - Use the "Custom token" template
-   - Permissions: `Zone:Zone:Read`, `Zone:Zone Settings:Edit`, `Account:Cloudflare Workers:Edit`
-   - Account Resources: Include your account
-   - Zone Resources: Include your zones (if any)
-
-2. **CLOUDFLARE_ACCOUNT_ID**: Copy from `npx wrangler whoami` or find in your (Cloudflare dashboard)[https://developers.cloudflare.com/fundamentals/account/find-account-and-zone-ids/]
-
-### Manual Deployment
-
-You can still deploy manually using:
-
-```bash
-npm run deploy
-```
-
-## Security Notes
-
-- The `SECRET_PASSWORD` is stored as a Cloudflare Worker secret (encrypted at rest)
-- Authentication failures return empty responses to avoid information leakage
-- All errors are logged to console for debugging while returning generic error messages to clients
+CI (`.github/workflows/ci.yml`) runs lint, typecheck, a check that `worker-configuration.d.ts` is up to date, and the test suite on every push and pull request.
