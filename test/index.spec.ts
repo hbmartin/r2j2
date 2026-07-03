@@ -1,5 +1,5 @@
-import { env, SELF } from 'cloudflare:test';
-import { describe, expect, it } from 'vitest';
+import { env, reset, SELF } from 'cloudflare:test';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import worker from '../src/index';
 
 const PASSWORD = 'test-password';
@@ -7,6 +7,10 @@ const BASE = 'https://example.com';
 
 // Required to get a correctly-typed `Request` to pass to `worker.fetch()`.
 const IncomingRequest = Request<unknown, IncomingRequestCfProperties>;
+
+afterEach(async () => {
+	await reset();
+});
 
 function addUrl(text: string, password = PASSWORD): string {
 	const url = new URL('/', BASE);
@@ -17,6 +21,15 @@ function addUrl(text: string, password = PASSWORD): string {
 
 function csvUrl(params: Record<string, string> = {}): string {
 	const url = new URL('/csv', BASE);
+	url.searchParams.set('password', PASSWORD);
+	for (const [key, value] of Object.entries(params)) {
+		url.searchParams.set(key, value);
+	}
+	return url.toString();
+}
+
+function countUrl(params: Record<string, string> = {}): string {
+	const url = new URL('/count', BASE);
 	url.searchParams.set('password', PASSWORD);
 	for (const [key, value] of Object.entries(params)) {
 		url.searchParams.set(key, value);
@@ -62,6 +75,31 @@ describe('request validation', () => {
 		expect(response.status).toBe(401);
 	});
 
+	it('accepts a bearer token instead of a query-string password', async () => {
+		const url = new URL('/', BASE);
+		url.searchParams.set('text', 'header auth');
+		const response = await SELF.fetch(url, {
+			headers: { Authorization: `Bearer ${PASSWORD}` },
+		});
+		expect(response.status).toBe(200);
+	});
+
+	it('accepts a custom password header instead of a query-string password', async () => {
+		const url = new URL('/', BASE);
+		url.searchParams.set('text', 'custom header auth');
+		const response = await SELF.fetch(url, {
+			headers: { 'X-Journal-Password': PASSWORD },
+		});
+		expect(response.status).toBe(200);
+	});
+
+	it('prefers header authentication over the query-string password', async () => {
+		const response = await SELF.fetch(addUrl('hello'), {
+			headers: { Authorization: 'Bearer wrong-password' },
+		});
+		expect(response.status).toBe(401);
+	});
+
 	it('requires auth before revealing whether a route exists', async () => {
 		const response = await SELF.fetch(`${BASE}/nope?password=wrong-password`);
 		expect(response.status).toBe(401);
@@ -78,10 +116,40 @@ describe('request validation', () => {
 	});
 
 	it('rejects invalid since/limit values with 400', async () => {
-		const invalid: Record<string, string>[] = [{ since: 'abc' }, { since: '-1' }, { since: '1.5' }, { limit: '0' }, { limit: 'ten' }];
+		const invalid: Record<string, string>[] = [
+			{ since: 'abc' },
+			{ since: '-1' },
+			{ since: '1.5' },
+			{ since: '1e2' },
+			{ since: '0x10' },
+			{ since: '' },
+			{ since: ' 5 ' },
+			{ limit: '0' },
+			{ limit: 'ten' },
+			{ limit: '1e2' },
+		];
 		for (const params of invalid) {
 			const response = await SELF.fetch(csvUrl(params));
 			expect(response.status).toBe(400);
+		}
+	});
+
+	it('returns a generic body for internal errors', async () => {
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		try {
+			const failingEnv = {
+				...env,
+				JOURNAL_BUCKET: {
+					put: async () => {
+						throw new Error('sensitive R2 detail');
+					},
+				} as unknown as R2Bucket,
+			};
+			const response = await worker.fetch(new IncomingRequest(addUrl('hello')), failingEnv);
+			expect(response.status).toBe(500);
+			expect(await response.text()).toBe('Internal Server Error');
+		} finally {
+			errorSpy.mockRestore();
 		}
 	});
 });
@@ -160,6 +228,8 @@ describe('writing and reading entries', () => {
 
 	it('ignores foreign objects under the entries prefix', async () => {
 		await env.JOURNAL_BUCKET.put(`${env.ENTRIES_PREFIX}123`, 'not a journal entry');
+		await env.JOURNAL_BUCKET.put(`${env.ENTRIES_PREFIX}000000000099`, 'missing separator');
+		await env.JOURNAL_BUCKET.put(`${env.ENTRIES_PREFIX}000000000098_aaaaaaaa`, 'wrong separator');
 		await seedEntry(100, 'real entry');
 		expect(await readCsv()).toBe('100,real entry\n');
 
@@ -183,6 +253,44 @@ describe('since and limit filters', () => {
 		await seedEntry(300, 'third', 'cccccccc');
 		expect(await readCsv({ limit: '2' })).toBe('100,first\n200,second\n');
 		expect(await readCsv({ since: '100', limit: '1' })).toBe('200,second\n');
+	});
+
+	it('does not fetch entry bodies beyond the requested limit', async () => {
+		const keys = ['000000000100-aaaaaaaa', '000000000200-bbbbbbbb', '000000000300-cccccccc'].map(
+			(suffix) => `${env.ENTRIES_PREFIX}${suffix}`,
+		);
+		const textByKey = new Map([
+			[keys[0], 'first'],
+			[keys[1], 'second'],
+			[keys[2], 'third'],
+		]);
+		const entryGets: string[] = [];
+		const listLimits: (number | undefined)[] = [];
+		const bucket = {
+			list: async (options: R2ListOptions) => {
+				listLimits.push(options.limit);
+				return {
+					objects: keys.map((key) => ({ key })),
+					truncated: false,
+				};
+			},
+			get: async (key: string) => {
+				if (key === env.LEGACY_JOURNAL_KEY) {
+					return null;
+				}
+				entryGets.push(key);
+				return { text: async () => textByKey.get(key) ?? '' };
+			},
+		} as unknown as R2Bucket;
+
+		const response = await worker.fetch(new IncomingRequest(csvUrl({ limit: '1' })), {
+			...env,
+			JOURNAL_BUCKET: bucket,
+		});
+		expect(response.status).toBe(200);
+		expect(await response.text()).toBe('100,first\n');
+		expect(listLimits).toEqual([1]);
+		expect(entryGets).toEqual([keys[0]]);
 	});
 });
 
@@ -211,5 +319,22 @@ describe('/count', () => {
 
 		const since = await SELF.fetch(`${BASE}/count?password=${PASSWORD}&since=200`);
 		expect(await since.json()).toEqual({ count: 1 });
+	});
+
+	it('ignores limit because /count only supports since filtering', async () => {
+		await seedEntry(100, 'newer');
+
+		const zero = await SELF.fetch(countUrl({ limit: '0' }));
+		expect(zero.status).toBe(200);
+		expect(await zero.json()).toEqual({ count: 1 });
+
+		const invalid = await SELF.fetch(countUrl({ limit: 'not-used' }));
+		expect(invalid.status).toBe(200);
+		expect(await invalid.json()).toEqual({ count: 1 });
+	});
+
+	it('still rejects invalid since values', async () => {
+		const response = await SELF.fetch(countUrl({ since: '1e2' }));
+		expect(response.status).toBe(400);
 	});
 });

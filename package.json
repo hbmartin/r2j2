@@ -15,16 +15,10 @@
 	},
 	"devDependencies": {
 		"@biomejs/biome": "^2.5.2",
-		"@cloudflare/vitest-pool-workers": "^0.12.21",
+		"@cloudflare/vitest-pool-workers": "^0.18.0",
 		"typescript": "^5.5.2",
-		"vitest": "~3.2.0",
-		"wrangler": "^4.106.0"
+		"vitest": "~4.1.9",
+		"wrangler": "^4.107.0"
 	},
-	"packageManager": "pnpm@10.33.0",
-	"pnpm": {
-		"onlyBuiltDependencies": [
-			"esbuild",
-			"workerd"
-		]
-	}
+	"packageManager": "pnpm@10.33.0"
 }

@@ -23,7 +23,7 @@ export default {
 			}
 
 			const url = new URL(request.url);
-			if (!(await authenticate(url, env))) {
+			if (!(await authenticate(request, url, env))) {
 				return new Response('', { status: 401 });
 			}
 
@@ -39,8 +39,7 @@ export default {
 			}
 		} catch (error) {
 			console.error('Error processing request:', error);
-			const message = error instanceof Error ? error.message : 'Unknown error';
-			return new Response(`Internal Server Error: ${message}`, { status: 500 });
+			return new Response('Internal Server Error', { status: 500 });
 		}
 	},
 } satisfies ExportedHandler<Env>;
@@ -54,8 +53,8 @@ async function isRateLimited(request: Request, env: Env): Promise<boolean> {
 	return !success;
 }
 
-async function authenticate(url: URL, env: Env): Promise<boolean> {
-	const password = url.searchParams.get('password');
+async function authenticate(request: Request, url: URL, env: Env): Promise<boolean> {
+	const password = passwordFromRequest(request, url);
 	if (!password || !env.SECRET_PASSWORD) {
 		return false;
 	}
@@ -66,6 +65,15 @@ async function authenticate(url: URL, env: Env): Promise<boolean> {
 		crypto.subtle.digest('SHA-256', encoder.encode(env.SECRET_PASSWORD)),
 	]);
 	return crypto.subtle.timingSafeEqual(provided, expected);
+}
+
+function passwordFromRequest(request: Request, url: URL): string | null {
+	const authorization = request.headers.get('Authorization');
+	if (authorization !== null) {
+		const bearer = /^Bearer\s+(.+)$/i.exec(authorization);
+		return bearer?.[1] ?? authorization;
+	}
+	return request.headers.get('X-Journal-Password') ?? url.searchParams.get('password');
 }
 
 async function handleAddEntry(url: URL, env: Env): Promise<Response> {
@@ -100,13 +108,13 @@ async function handleCsv(url: URL, env: Env): Promise<Response> {
 }
 
 async function handleCount(url: URL, env: Env): Promise<Response> {
-	const filters = parseFilters(url);
-	if (filters === null) {
+	const since = parseSince(url);
+	if (since === null) {
 		return new Response('', { status: 400 });
 	}
 
-	const [keys, legacy] = await Promise.all([listEntryKeys(env, filters.since), loadLegacyEntries(env)]);
-	const legacyCount = legacy.filter((entry) => filters.since === undefined || entry.timestamp > filters.since).length;
+	const [keys, legacy] = await Promise.all([listEntryKeys(env, since), loadLegacyEntries(env)]);
+	const legacyCount = legacy.filter((entry) => since === undefined || entry.timestamp > since).length;
 	return Response.json({ count: keys.length + legacyCount });
 }
 
@@ -116,7 +124,7 @@ interface Filters {
 }
 
 function parseFilters(url: URL): Filters | null {
-	const since = parseNonNegativeInt(url.searchParams.get('since'));
+	const since = parseSince(url);
 	const limit = parseNonNegativeInt(url.searchParams.get('limit'));
 	if (since === null || limit === null || limit === 0) {
 		return null;
@@ -124,20 +132,27 @@ function parseFilters(url: URL): Filters | null {
 	return { since, limit };
 }
 
+function parseSince(url: URL): number | undefined | null {
+	return parseNonNegativeInt(url.searchParams.get('since'));
+}
+
 /** Returns undefined when absent, null when present but not a non-negative integer. */
 function parseNonNegativeInt(value: string | null): number | undefined | null {
 	if (value === null) {
 		return undefined;
 	}
+	if (!/^\d+$/.test(value)) {
+		return null;
+	}
 	const parsed = Number(value);
-	if (!Number.isInteger(parsed) || parsed < 0) {
+	if (!Number.isSafeInteger(parsed)) {
 		return null;
 	}
 	return parsed;
 }
 
 async function loadEntries(env: Env, filters: Filters): Promise<JournalEntry[]> {
-	const [keys, legacy] = await Promise.all([listEntryKeys(env, filters.since), loadLegacyEntries(env)]);
+	const [keys, legacy] = await Promise.all([listEntryKeys(env, filters.since, filters.limit), loadLegacyEntries(env)]);
 
 	// Merge timestamps first and apply the limit before fetching any bodies,
 	// so a limited read costs at most `limit` R2 get() calls, not one per entry.
@@ -174,7 +189,7 @@ interface EntryKey {
 	timestamp: number;
 }
 
-async function listEntryKeys(env: Env, since?: number): Promise<EntryKey[]> {
+async function listEntryKeys(env: Env, since?: number, keyLimit?: number): Promise<EntryKey[]> {
 	const prefix = entriesPrefix(env);
 	const keys: EntryKey[] = [];
 	let cursor: string | undefined;
@@ -182,6 +197,7 @@ async function listEntryKeys(env: Env, since?: number): Promise<EntryKey[]> {
 		const listed = await env.JOURNAL_BUCKET.list({
 			prefix,
 			cursor,
+			limit: keyLimit === undefined ? undefined : Math.max(1, Math.min(1000, keyLimit - keys.length)),
 			// Skip most already-seen keys server-side; the exact `> since`
 			// comparison below handles entries within the same second.
 			startAfter: cursor === undefined && since !== undefined ? prefix + padTimestamp(since) : undefined,
@@ -190,6 +206,9 @@ async function listEntryKeys(env: Env, since?: number): Promise<EntryKey[]> {
 			const timestamp = timestampFromKey(object.key, prefix);
 			if (timestamp !== null && (since === undefined || timestamp > since)) {
 				keys.push({ key: object.key, timestamp });
+				if (keyLimit !== undefined && keys.length >= keyLimit) {
+					return keys;
+				}
 			}
 		}
 		cursor = listed.truncated ? listed.cursor : undefined;
@@ -226,13 +245,12 @@ function entryKey(env: Env, timestamp: number): string {
 }
 
 function timestampFromKey(key: string, prefix: string): number | null {
-	const encoded = key.slice(prefix.length, prefix.length + TIMESTAMP_PAD);
-	// Require exactly TIMESTAMP_PAD digits so foreign objects under the prefix
-	// (e.g. a manually uploaded `entries/123`) are ignored, not misparsed.
-	if (encoded.length !== TIMESTAMP_PAD || !/^\d+$/.test(encoded)) {
+	const suffix = key.slice(prefix.length);
+	const match = new RegExp(`^(\\d{${TIMESTAMP_PAD}})-[0-9a-f]{8}$`).exec(suffix);
+	if (match === null) {
 		return null;
 	}
-	return Number(encoded);
+	return Number(match[1]);
 }
 
 function padTimestamp(timestamp: number): string {
