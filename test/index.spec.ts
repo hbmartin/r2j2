@@ -256,9 +256,11 @@ describe('since and limit filters', () => {
 	});
 
 	it('does not fetch entry bodies beyond the requested limit', async () => {
+		const ignoredKeys = ['000000000050', '000000000075_ignored'].map((suffix) => `${env.ENTRIES_PREFIX}${suffix}`);
 		const keys = ['000000000100-aaaaaaaa', '000000000200-bbbbbbbb', '000000000300-cccccccc'].map(
 			(suffix) => `${env.ENTRIES_PREFIX}${suffix}`,
 		);
+		const listedKeys = [...ignoredKeys, ...keys];
 		const textByKey = new Map([
 			[keys[0], 'first'],
 			[keys[1], 'second'],
@@ -269,9 +271,14 @@ describe('since and limit filters', () => {
 		const bucket = {
 			list: async (options: R2ListOptions) => {
 				listLimits.push(options.limit);
+				const offset = options.cursor === undefined ? 0 : Number(options.cursor);
+				const limit = options.limit ?? listedKeys.length;
+				const pageKeys = listedKeys.slice(offset, offset + limit);
+				const nextOffset = offset + pageKeys.length;
 				return {
-					objects: keys.map((key) => ({ key })),
-					truncated: false,
+					objects: pageKeys.map((key) => ({ key })),
+					truncated: nextOffset < listedKeys.length,
+					cursor: String(nextOffset),
 				};
 			},
 			get: async (key: string) => {
@@ -289,7 +296,7 @@ describe('since and limit filters', () => {
 		});
 		expect(response.status).toBe(200);
 		expect(await response.text()).toBe('100,first\n');
-		expect(listLimits).toEqual([1]);
+		expect(listLimits).toEqual([1000]);
 		expect(entryGets).toEqual([keys[0]]);
 	});
 });
