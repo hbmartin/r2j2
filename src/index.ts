@@ -7,6 +7,7 @@ const DEFAULT_ENTRIES_PREFIX = 'entries/';
 const DEFAULT_LEGACY_JOURNAL_KEY = 'journal.txt';
 // Unix timestamps padded to 12 digits sort lexicographically until year 33658.
 const TIMESTAMP_PAD = 12;
+const TIMESTAMP_KEY_REGEX = new RegExp(`^(\\d{${TIMESTAMP_PAD}})-[0-9a-f]{8}$`);
 // Number of R2 get() calls issued concurrently when reading entries back.
 const READ_BATCH_SIZE = 50;
 
@@ -197,7 +198,7 @@ async function listEntryKeys(env: Env, since?: number, keyLimit?: number): Promi
 		const listed = await env.JOURNAL_BUCKET.list({
 			prefix,
 			cursor,
-			limit: keyLimit === undefined ? undefined : Math.max(1, Math.min(1000, keyLimit - keys.length)),
+			limit: keyLimit === undefined ? undefined : 1000,
 			// Skip most already-seen keys server-side; the exact `> since`
 			// comparison below handles entries within the same second.
 			startAfter: cursor === undefined && since !== undefined ? prefix + padTimestamp(since) : undefined,
@@ -246,7 +247,7 @@ function entryKey(env: Env, timestamp: number): string {
 
 function timestampFromKey(key: string, prefix: string): number | null {
 	const suffix = key.slice(prefix.length);
-	const match = new RegExp(`^(\\d{${TIMESTAMP_PAD}})-[0-9a-f]{8}$`).exec(suffix);
+	const match = TIMESTAMP_KEY_REGEX.exec(suffix);
 	if (match === null) {
 		return null;
 	}
