@@ -54,17 +54,17 @@ Pushes to `main` also deploy automatically via GitHub Actions (`.github/workflow
 
 ## Usage
 
-All endpoints are `GET` and take the password as a `password` query parameter.
+All endpoints are `GET`. Prefer sending the password in an `Authorization: Bearer <password>` header or `X-Journal-Password` header. A `password` query parameter is still accepted as a fallback for URL-only clients.
 
-> Note: the password travels in the URL by design (this API is meant to be callable from anywhere a URL can go). Be aware that URLs can end up in logs and browser history; the per-IP rate limit and constant-time comparison mitigate brute-forcing, but treat any URL containing the password as sensitive.
+> Note: URLs can end up in logs and browser history. Treat any URL containing the password as sensitive; header authentication avoids that exposure for clients that can set headers.
 
 ### Add Journal Entry
 
 - **Path**: `/`
-- **Parameters**: `password` (required), `text` (required)
+- **Parameters**: auth header or `password` fallback, `text` (required)
 
 ```bash
-curl "https://your-worker.your-subdomain.workers.dev/?password=your-secret&text=Hello%20World%21"
+curl -H "Authorization: Bearer your-secret" "https://your-worker.your-subdomain.workers.dev/?text=Hello%20World%21"
 ```
 
 Returns `200` with a JSON body:
@@ -76,15 +76,15 @@ Returns `200` with a JSON body:
 ### Retrieve Journal Contents
 
 - **Path**: `/csv`
-- **Parameters**: `password` (required), `since` (optional Unix timestamp, exclusive), `limit` (optional positive integer)
+- **Parameters**: auth header or `password` fallback, `since` (optional Unix timestamp, exclusive), `limit` (optional positive integer)
 
 ```bash
-curl "https://your-worker.your-subdomain.workers.dev/csv?password=your-secret&since=1640995200&limit=100"
+curl -H "Authorization: Bearer your-secret" "https://your-worker.your-subdomain.workers.dev/csv?since=1640995200&limit=100"
 ```
 
 Returns `200` with `text/csv` content, oldest first. Text containing commas, quotes, or newlines is escaped per RFC 4180:
 
-```
+```text
 1640995200,Hello World!
 1640995260,"an entry, with a comma"
 ```
@@ -92,10 +92,10 @@ Returns `200` with `text/csv` content, oldest first. Text containing commas, quo
 ### Count Journal Entries
 
 - **Path**: `/count`
-- **Parameters**: `password` (required), `since` (optional Unix timestamp, exclusive)
+- **Parameters**: auth header or `password` fallback, `since` (optional Unix timestamp, exclusive)
 
 ```bash
-curl "https://your-worker.your-subdomain.workers.dev/count?password=your-secret"
+curl -H "Authorization: Bearer your-secret" "https://your-worker.your-subdomain.workers.dev/count"
 ```
 
 Returns `200` with a JSON body:
@@ -107,7 +107,7 @@ Returns `200` with a JSON body:
 ### Response Codes
 
 - `200`: Success
-- `400`: Missing `text`, or invalid `since`/`limit`
+- `400`: Missing `text`, invalid `since`, or invalid `/csv` `limit`
 - `401`: Missing or invalid password
 - `404`: Unknown path (authenticated requests only; unauthenticated requests always get 401)
 - `405`: Method not allowed (non-GET requests)
@@ -129,7 +129,7 @@ pnpm cf-typegen     # regenerate worker-configuration.d.ts after changing wrangl
 
 For local dev, put a development password in `.dev.vars` (gitignored):
 
-```
+```text
 SECRET_PASSWORD=dev-password
 ```
 

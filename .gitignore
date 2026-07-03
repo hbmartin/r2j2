@@ -170,3 +170,7 @@ dist
 
 .dev.vars
 .wrangler/
+
+# PR feedback triage artifacts
+reviews_triage/
+triage_decisions.db

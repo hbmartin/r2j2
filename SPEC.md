@@ -2,7 +2,7 @@
 
 ## Endpoints
 
-All endpoints are `GET` only and authenticate via a `password` query parameter.
+All endpoints are `GET` only. Prefer authenticating with an `Authorization: Bearer <password>` header or `X-Journal-Password` header; a `password` query parameter remains available as a fallback.
 
 ### Add Journal Entry
 - **Method**: GET
@@ -25,14 +25,14 @@ All endpoints are `GET` only and authenticate via a `password` query parameter.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `password` | string | Yes | Authentication password (must match `SECRET_PASSWORD` secret) |
+| `password` | string | Conditional | Fallback authentication password when no supported auth header is supplied |
 | `text` | string | Yes | Journal entry text (URL-decoded once by standard query parsing) |
 
 ### CSV Endpoint (`/csv`)
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `password` | string | Yes | Authentication password |
+| `password` | string | Conditional | Fallback authentication password when no supported auth header is supplied |
 | `since` | integer | No | Only return entries with a Unix timestamp strictly greater than this value |
 | `limit` | integer | No | Return at most this many entries (oldest first); must be a positive integer |
 
@@ -40,8 +40,18 @@ All endpoints are `GET` only and authenticate via a `password` query parameter.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `password` | string | Yes | Authentication password |
+| `password` | string | Conditional | Fallback authentication password when no supported auth header is supplied |
 | `since` | integer | No | Only count entries with a Unix timestamp strictly greater than this value |
+
+## Authentication
+
+The supplied password must match `SECRET_PASSWORD`. The worker checks credentials in this order:
+
+1. `Authorization` header. `Bearer <password>` is preferred; a non-Bearer value is treated as the password for simple clients.
+2. `X-Journal-Password` header.
+3. `password` query parameter.
+
+Header authentication avoids placing the password in URLs, where it may be logged by browsers, proxies, or edge access logs.
 
 ## Environment
 
@@ -55,7 +65,7 @@ All endpoints are `GET` only and authenticate via a `password` query parameter.
 
 1. Reject non-GET requests with 405.
 2. Check the per-IP rate limit (keyed on `CF-Connecting-IP`); reject with 429 when exceeded.
-3. Authenticate: compare the SHA-256 digest of the `password` parameter against the digest of `SECRET_PASSWORD` using a constant-time comparison. A missing or wrong password returns 401 with an empty body. Authentication happens before routing, so unauthenticated requests cannot probe which paths exist.
+3. Authenticate: compare the SHA-256 digest of the supplied password against the digest of `SECRET_PASSWORD` using a constant-time comparison. A missing or wrong password returns 401 with an empty body. Authentication happens before routing, so unauthenticated requests cannot probe which paths exist.
 4. Route by path; unknown paths return 404.
 
 ### Write path (`/`)
@@ -76,23 +86,24 @@ All endpoints are `GET` only and authenticate via a `password` query parameter.
 
 ### Count path (`/count`)
 
-Returns 200 with JSON body `{"count": <number>}` counting entry objects plus legacy lines, honoring `since`.
+Returns 200 with JSON body `{"count": <number>}` counting entry objects plus legacy lines, honoring `since`. The `limit` parameter is ignored on this endpoint.
 
 ## Response Codes
 
 - **200 OK**: success (`/` returns JSON, `/csv` returns CSV, `/count` returns JSON)
-- **400 Bad Request**: missing `text`, or invalid `since`/`limit` (empty body)
+- **400 Bad Request**: missing `text`, invalid `since`, or invalid `/csv` `limit` (empty body)
 - **401 Unauthorized**: missing or wrong `password` (empty body)
 - **404 Not Found**: authenticated request to an unknown path
 - **405 Method Not Allowed**: non-GET request (plain text body)
 - **429 Too Many Requests**: per-IP rate limit exceeded (plain text body)
-- **500 Internal Server Error**: unexpected error, e.g. an R2 failure (plain text body with the error message; also logged to console)
+- **500 Internal Server Error**: unexpected error, e.g. an R2 failure (generic plain text body; details are logged to console)
 
 ## Example Requests
 
 ### Add an entry
-```
-GET /?password=mySecretPass&text=Hello%20World%21
+```text
+GET /?text=Hello%20World%21
+Authorization: Bearer mySecretPass
 ```
 Response: `200 OK`
 ```json
@@ -100,23 +111,26 @@ Response: `200 OK`
 ```
 
 ### Read the journal
-```
-GET /csv?password=mySecretPass
+```text
+GET /csv
+Authorization: Bearer mySecretPass
 ```
 Response: `200 OK`
-```
+```text
 1640995200,Hello World!
 1640995260,"an entry, with a comma"
 ```
 
 ### Read entries newer than a timestamp, at most 100
-```
-GET /csv?password=mySecretPass&since=1640995200&limit=100
+```text
+GET /csv?since=1640995200&limit=100
+Authorization: Bearer mySecretPass
 ```
 
 ### Count entries
-```
-GET /count?password=mySecretPass
+```text
+GET /count
+Authorization: Bearer mySecretPass
 ```
 Response: `200 OK`
 ```json
