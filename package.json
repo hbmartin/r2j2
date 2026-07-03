@@ -7,12 +7,24 @@
 		"dev": "wrangler dev",
 		"start": "wrangler dev",
 		"test": "vitest",
+		"test:run": "vitest run",
+		"typecheck": "tsc --noEmit && tsc --noEmit -p test",
+		"lint": "biome check .",
+		"format": "biome check --write .",
 		"cf-typegen": "wrangler types"
 	},
 	"devDependencies": {
-		"@cloudflare/vitest-pool-workers": "^0.8.19",
+		"@biomejs/biome": "^2.5.2",
+		"@cloudflare/vitest-pool-workers": "^0.12.21",
 		"typescript": "^5.5.2",
 		"vitest": "~3.2.0",
-		"wrangler": "^4.21.2"
+		"wrangler": "^4.106.0"
+	},
+	"packageManager": "pnpm@10.33.0",
+	"pnpm": {
+		"onlyBuiltDependencies": [
+			"esbuild",
+			"workerd"
+		]
 	}
 }

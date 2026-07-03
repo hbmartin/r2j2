@@ -2,129 +2,127 @@
 
 ## Endpoints
 
+All endpoints are `GET` only and authenticate via a `password` query parameter.
+
 ### Add Journal Entry
 - **Method**: GET
 - **Path**: `/` (root)
-- **Purpose**: Authenticate and append timestamped journal entries to R2 storage
+- **Purpose**: Append a timestamped journal entry to R2 storage
 
 ### Retrieve Journal Contents
 - **Method**: GET
 - **Path**: `/csv`
-- **Purpose**: Authenticate and retrieve journal contents as CSV
+- **Purpose**: Retrieve journal contents as CSV
+
+### Count Journal Entries
+- **Method**: GET
+- **Path**: `/count`
+- **Purpose**: Return the number of journal entries as JSON
 
 ## Parameters
 
-### Root Endpoint (`/`) Parameters
-Both parameters are required query parameters:
+### Root Endpoint (`/`)
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `password` | string | Yes | Authentication password (must match `SECRET_PASSWORD` env var) |
-| `text` | string | Yes | Journal entry text (will be URL decoded) |
+| `password` | string | Yes | Authentication password (must match `SECRET_PASSWORD` secret) |
+| `text` | string | Yes | Journal entry text (URL-decoded once by standard query parsing) |
 
-### CSV Endpoint (`/csv`) Parameters
-Only password parameter is required:
+### CSV Endpoint (`/csv`)
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `password` | string | Yes | Authentication password (must match `SECRET_PASSWORD` env var) |
+| `password` | string | Yes | Authentication password |
+| `since` | integer | No | Only return entries with a Unix timestamp strictly greater than this value |
+| `limit` | integer | No | Return at most this many entries (oldest first); must be a positive integer |
 
-## Environment Variables
-- `SECRET_PASSWORD`: The authentication password stored securely in Cloudflare Worker environment
+### Count Endpoint (`/count`)
 
-## R2 Configuration
-- **R2 Bucket Binding**: `JOURNAL_BUCKET` (bound to bucket `harold-martin`)
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `password` | string | Yes | Authentication password |
+| `since` | integer | No | Only count entries with a Unix timestamp strictly greater than this value |
+
+## Environment
+
+- `SECRET_PASSWORD` (secret): the authentication password, set via `wrangler secret put SECRET_PASSWORD`
+- `ENTRIES_PREFIX` (var, default `entries/`): R2 key prefix under which one object per entry is stored
+- `LEGACY_JOURNAL_KEY` (var, default `journal.txt`): key of a pre-existing single-file journal that is merged into read results
+- `JOURNAL_BUCKET` (R2 binding): the journal bucket
+- `RATE_LIMITER` (rate limit binding): per-IP request rate limiting
 
 ## Request Flow
-1. Extract `password` and `text` query parameters
-2. Validate `password` against `SECRET_PASSWORD` environment variable
-3. If authentication fails, return 401 with no body
-4. If authentication succeeds:
-   - URL decode the `text` parameter
-   - Generate Unix timestamp
-   - Format entry as: `{timestamp},{decoded_text}\n`
-   - Append to `journal.txt` in R2 bucket `harold-martin`
-5. Return appropriate response based on operation result
+
+1. Reject non-GET requests with 405.
+2. Check the per-IP rate limit (keyed on `CF-Connecting-IP`); reject with 429 when exceeded.
+3. Authenticate: compare the SHA-256 digest of the `password` parameter against the digest of `SECRET_PASSWORD` using a constant-time comparison. A missing or wrong password returns 401 with an empty body. Authentication happens before routing, so unauthenticated requests cannot probe which paths exist.
+4. Route by path; unknown paths return 404.
+
+### Write path (`/`)
+
+1. Read `text` from the query string (standard single URL-decode; the worker never calls `decodeURIComponent` again).
+2. Missing or empty `text` returns 400 with an empty body.
+3. Generate a Unix timestamp (seconds).
+4. Write the raw text as a **new R2 object** with key `{ENTRIES_PREFIX}{timestamp padded to 12 digits}-{8 random hex chars}`. One object per entry makes writes atomic: concurrent requests can never lose data the way a read-modify-write of a shared file could, and keys sort chronologically.
+5. Return 200 with JSON body `{"timestamp": <unix_timestamp>}`.
+
+### Read path (`/csv`)
+
+1. Validate `since`/`limit`; invalid values return 400.
+2. List entry objects under `ENTRIES_PREFIX` (paginated; `startAfter` is used to skip keys at or before `since`).
+3. Read the legacy single-file journal at `LEGACY_JOURNAL_KEY` (if present) and parse its `timestamp,text` lines.
+4. Merge, filter by `since` (exclusive), sort ascending by timestamp, and apply `limit`.
+5. Serialize as CSV with `Content-Type: text/csv; charset=utf-8`. Each row is `{timestamp},{text}`; text containing commas, double quotes, or line breaks is quoted and escaped per RFC 4180.
+
+### Count path (`/count`)
+
+Returns 200 with JSON body `{"count": <number>}` counting entry objects plus legacy lines, honoring `since`.
 
 ## Response Codes
 
-### Success
-- **200 OK**:
-  - Root endpoint: Entry successfully saved (empty body)
-  - CSV endpoint: Journal contents returned as plain text CSV
-
-### Client Errors
-- **400 Bad Request**: Missing required parameters
-  - Root endpoint: missing `password` or `text`
-  - CSV endpoint: missing `password`
-- **Body**: Empty
-- **401 Unauthorized**: Password parameter doesn't match `SECRET_PASSWORD`
-- **Body**: Empty
-- **405 Method Not Allowed**: Non-GET request method used
-- **Body**: Plain text error message
-
-### Server Errors
-- **500 Internal Server Error**: R2 operation failed
-- **Body**: Plain text error message describing the failure
-
-## File Format
-Entries in `journal.txt` follow this format:
-```
-{unix_timestamp},{url_decoded_text}
-{unix_timestamp},{url_decoded_text}
-...
-```
+- **200 OK**: success (`/` returns JSON, `/csv` returns CSV, `/count` returns JSON)
+- **400 Bad Request**: missing `text`, or invalid `since`/`limit` (empty body)
+- **401 Unauthorized**: missing or wrong `password` (empty body)
+- **404 Not Found**: authenticated request to an unknown path
+- **405 Method Not Allowed**: non-GET request (plain text body)
+- **429 Too Many Requests**: per-IP rate limit exceeded (plain text body)
+- **500 Internal Server Error**: unexpected error, e.g. an R2 failure (plain text body with the error message; also logged to console)
 
 ## Example Requests
 
-### Root Endpoint - Add Journal Entry
-
-#### Successful Request
+### Add an entry
 ```
 GET /?password=mySecretPass&text=Hello%20World%21
 ```
-Response: `200 OK` (empty body)
-
-#### Authentication Failure
+Response: `200 OK`
+```json
+{"timestamp": 1640995200}
 ```
-GET /?password=wrongpass&text=Hello%20World%21
-```
-Response: `401 Unauthorized` (empty body)
 
-#### Missing Parameters
-```
-GET /?password=mySecretPass
-```
-Response: `400 Bad Request` (empty body)
-
-### CSV Endpoint - Get Journal Contents
-
-#### Successful Request
+### Read the journal
 ```
 GET /csv?password=mySecretPass
 ```
 Response: `200 OK`
 ```
 1640995200,Hello World!
-1640995260,Another entry
+1640995260,"an entry, with a comma"
 ```
 
-#### Authentication Failure
+### Read entries newer than a timestamp, at most 100
 ```
-GET /csv?password=wrongpass
+GET /csv?password=mySecretPass&since=1640995200&limit=100
 ```
-Response: `401 Unauthorized` (empty body)
 
-#### Missing Parameters
+### Count entries
 ```
-GET /csv
+GET /count?password=mySecretPass
 ```
-Response: `400 Bad Request` (empty body)
+Response: `200 OK`
+```json
+{"count": 2}
+```
 
-## Implementation Notes
-- The worker should handle URL decoding of the `text` parameter
-- Unix timestamps should be generated at the time of processing
-- R2 operations should append to existing file or create if it doesn't exist
-- **R2 Append Strategy**: Use R2's put operation with new content only - don't read existing file to minimize operations and costs
-- All R2 errors should be caught and returned as 500 responses with error details
-- Internal errors should be logged to console for debugging
+## Backward Compatibility
+
+Deployments that previously stored the whole journal in a single `journal.txt` object keep working: that file is never modified, and its lines are merged into `/csv` and `/count` results alongside per-object entries. Legacy lines are re-escaped on output, and a malformed legacy line (no leading integer timestamp) is preserved with timestamp `0` rather than dropped.
